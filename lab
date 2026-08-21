@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# lab — CROPS Lab host CLI. Boots a throwaway macOS VM (tart, via
+# clawd-containers' `cont`), taps its traffic from OUTSIDE the guest, runs
+# one wallet/dapp action, and collects a decrypted capture into out/<run>/.
+#
+#   lab doctor              host prerequisites, one line each
+#   lab bake                build crops-gold once (Tier 1+2; identity-free)
+#   lab run <action>        clone gold -> sync Tier 3 -> capture -> action -> collect
+#   lab summarize <run-id>  re-run the audit over an existing capture
+#   lab shell | gui | status | down | rm
+#
+# Patterns lifted from clawd-containers (read its CLAUDE.md):
+#   - gold image baked once; every run `tart clone`s it and syncs ONLY the
+#     volatile Tier-3 state, never re-provisions from the 33GB base
+#   - one tar stream for every file; graceful in-guest `shutdown -h` BEFORE
+#     `tart stop` (a hard stop has rolled back fresh writes)
+#   - awk, never `grep -q`, over `tart list` (pipefail + grep's early exit
+#     SIGPIPEs tart and a running VM reads as stopped ~70% of the time)
+#   - a python `timeout` shim (macOS has no coreutils timeout)
+#   - secrets are Tier 3 only; a gold image carries no key, no proxy, no CA
+#
+# Transport: `tart exec` (Tart Guest Agent, in every cirruslabs image), NOT
+# ssh. It runs as admin inside the Aqua session (headed Chrome just works),
+# `-i` carries a tar stream, and it needs no network path to the guest —
+# which matters here: a launchd-spawned host process (this harness) is
+# denied macOS "Local Network" access and gets EHOSTUNREACH on bridge100
+# even though the guest is up. ssh from here never connects; exec does.
+#
+# We use cont's pure VM verbs (up/down/rm/open/snapshot) and do our own
+# provisioning — `cont provision` would also inject this host's Claude OAuth
+# login into the guest and put it under credential custody, which a
+# traffic-profiler VM must never carry.
+set -euo pipefail
+
+if ! command -v timeout >/dev/null 2>&1; then
+  timeout() {
+    python3 - "$@" <<'PY'
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY
+  }
+fi
+
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink "$self")"
+  [[ "$link" = /* ]] && self="$link" || self="$(cd "$(dirname "$self")" && pwd)/$(basename "$link")"
+done
+LAB_DIR="$(cd "$(dirname "$self")" && pwd)"
+
+CONT_DIR="${CONT_DIR:-$HOME/clawd/clawd-containers}"
+CONT="$CONT_DIR/cont"
+UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
+BASE="${CROPS_BASE:-$UPSTREAM_BASE}"
+VM="${VM:-crops}"
+GOLD="${GOLD:-${VM}-gold}"
+PREP="${VM}-prep"
+OUT_ROOT="$LAB_DIR/out"
+CA_DIR="$LAB_DIR/ca"
+CA_CERT="$CA_DIR/mitmproxy-ca-cert.pem"
+ENV_FILE="$LAB_DIR/.env.crops"
+PROXY_PORT="${PROXY_PORT:-8080}"
+ACTION_TIMEOUT="${ACTION_TIMEOUT:-900}"
+AGENT_WAIT="${AGENT_WAIT:-600}"     # first boot of a fresh clone: agent up at ~5-7 min here
+
+RUN_LOG=""
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | { if [[ -n "$RUN_LOG" ]]; then tee -a "$RUN_LOG"; else cat; fi; } >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+# ── VM state (awk, not grep -q) ────────────────────────────────────────
+vm_exists()  { tart list --quiet --source local 2>/dev/null | awk -v n="$1" '$0==n{f=1} END{exit !f}'; }
+vm_running() { tart list 2>/dev/null | awk -v n="$1" '$1=="local" && $2==n && $NF=="running"{f=1} END{exit !f}'; }
+running_count() { tart list 2>/dev/null | awk '$1=="local" && $NF=="running"{n++} END{print n+0}'; }
+
+# ── guest transport: tart exec ─────────────────────────────────────────
+gx()  { tart exec "$@"; }                 # gx <vm> <cmd...>
+gxi() { tart exec -i "$@"; }              # with host stdin attached
+
+# The agent comes up after the admin auto-login, minutes after `running`.
+wait_agent() {
+  local name="$1" i deadline
+  deadline=$(( $(date +%s) + AGENT_WAIT ))
+  log "waiting for $name guest agent (up to ${AGENT_WAIT}s)"
+  i=0
+  while (( $(date +%s) < deadline )); do
+    i=$((i+1))
+    if timeout 15 tart exec "$name" true >/dev/null 2>&1; then
+      log "guest agent ready on $name after ${i} probe(s)"; return 0
+    fi
+    vm_running "$name" || die "$name stopped while waiting for its agent"
+    sleep 5
+  done
+  die "guest agent on $name not ready after ${AGENT_WAIT}s"
+}
+
+# Graceful stop: sync + shutdown inside, wait, then cont down as backstop.
+graceful_stop() {
+  local name="$1" i
+  vm_running "$name" || return 0
+  log "graceful shutdown of $name"
+  local rc=0
+  # absolute path: tart exec's PATH has no /sbin
+  timeout 20 tart exec "$name" sh -c 'sync; sync; sudo -n /sbin/shutdown -h now' >/dev/null 2>&1 || rc=$?
+  (( rc == 0 )) || log "  in-guest shutdown returned rc=$rc"
+  for i in $(seq 1 45); do vm_running "$name" || { log "  $name halted after ~$((i*2))s"; return 0; }; sleep 2; done
+  log "$name still running after 90s — tart stop"; "$CONT" down "$name" >/dev/null 2>&1 || true
+}
+
+# ── Shipping: stage everything, one tar stream, then run the provisioner ──
+# mode = bake | run. Bake never stages secrets or proxy settings.
+ship_and_provision() {
+  local name="$1" mode="$2" host_proxy="${3:-}" run_id="${4:-}"
+  local stage; stage="$(mktemp -d)"
+  # cleanup at return: capture the dir in the trap body now, so it can't
+  # dereference the out-of-scope local under `set -u` when RETURN fires.
+  trap "rm -rf '$stage'" RETURN
+  mkdir -p "$stage/crops"
+  cp "$LAB_DIR/guest/provision-crops.sh" "$stage/crops/provision-crops.sh"
+  cp "$LAB_DIR/guest/run-action.sh"      "$stage/crops/run-action.sh"
+  [[ -f "$CONT_DIR/provision.sh" ]] && cp "$CONT_DIR/provision.sh" "$stage/crops/provision.sh"
+  cp -R "$LAB_DIR/actions" "$stage/crops/actions"
+  if [[ "$mode" == "run" ]]; then
+    cp "$CA_CERT" "$stage/crops/mitm-ca-cert.pem"
+    printf 'HOST_PROXY=%s\nPROXY_PORT=%s\nRUN_ID=%s\n' "$host_proxy" "$PROXY_PORT" "$run_id" > "$stage/crops/run.env"
+    [[ -f "$ENV_FILE" ]] && install -m 600 "$ENV_FILE" "$stage/crops/.env.crops"
+    [[ -d "$LAB_DIR/wallet" ]] && cp -R "$LAB_DIR/wallet" "$stage/crops/wallet"
+  fi
+  local nfiles attempt ok=0
+  nfiles="$(find "$stage" -type f | wc -l | tr -d ' ')"
+  for attempt in 1 2 3; do
+    log "shipping $nfiles files -> $name:/tmp/crops (attempt $attempt/3)"
+    if tar cf - -C "$stage" crops \
+       | gxi "$name" sh -c 'rm -rf /tmp/crops && cd /tmp && tar xf - --no-same-owner'; then ok=1; break; fi
+    sleep 5
+  done
+  (( ok )) || die "transfer to $name failed 3x"
+  local flag
+  case "$mode" in bake) flag="CROPS_BAKE=1" ;; run) flag="CROPS_FAST=1" ;; esac
+  log "provisioning $name ($flag)"
+  gx "$name" env "$flag" bash /tmp/crops/provision-crops.sh
+  gx "$name" sh -c 'sync; sync'
+}
+
+# ── mitm CA: one per lab install, generated by mitmproxy itself ──────────
+ensure_ca() {
+  [[ -f "$CA_CERT" ]] && return 0
+  command -v mitmdump >/dev/null || die "mitmdump not installed (brew install mitmproxy)"
+  log "generating mitm CA in $CA_DIR"
+  mkdir -p "$CA_DIR"; chmod 700 "$CA_DIR"
+  mitmdump --set "confdir=$CA_DIR" --listen-host 127.0.0.1 --listen-port 0 -q >/dev/null 2>&1 &
+  local pid=$! i
+  for i in $(seq 1 20); do [[ -f "$CA_CERT" ]] && break; sleep 0.5; done
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  [[ -f "$CA_CERT" ]] || die "mitmproxy did not write $CA_CERT"
+}
+
+bridge_ip() { ifconfig bridge100 2>/dev/null | awk '/inet /{print $2; exit}'; }
+
+# tcpdump needs root. With `-Z $USER` it drops to us after opening the
+# device, so WE can signal it to stop. Needs one sudoers line (lab doctor).
+tcpdump_ok() { sudo -n /usr/sbin/tcpdump --version >/dev/null 2>&1; }
+SUDOERS_LINE="$USER ALL=(root) NOPASSWD: /usr/sbin/tcpdump"
+
+guest_manifest() {  # $1 = vm; prints the version pins the capture depends on
+  gx "$1" sh -c 'echo "macos: $(sw_vers -productVersion) ($(sw_vers -buildVersion))";
+    echo "chrome: $("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version 2>/dev/null)";
+    echo "node: $(/opt/homebrew/bin/node --version 2>/dev/null)";
+    echo "playwright: $(cd ~/lab 2>/dev/null && /opt/homebrew/bin/node -p "require(\"playwright/package.json\").version" 2>/dev/null)";
+    echo "quic_allowed: $(defaults read com.google.Chrome QuicAllowed 2>/dev/null)"'
+}
+
+# ── commands ───────────────────────────────────────────────────────────
+cmd_doctor() {
+  local ok=0 bad=0
+  chk() { if eval "$2" >/dev/null 2>&1; then printf '  ok    %s\n' "$1"; ok=$((ok+1)); else printf '  MISSING %s%s\n' "$1" "${3:+ — $3}"; bad=$((bad+1)); fi; }
+  chk "tart with exec" 'tart exec --help'  "brew install cirruslabs/cli/tart (>= 2.20)"
+  chk "cont ($CONT)" 'test -x "$CONT"' "git clone https://github.com/clawdbotatg/clawd-containers ~/clawd/clawd-containers"
+  chk "mitmdump"    'command -v mitmdump' "brew install mitmproxy"
+  chk "base image $BASE" 'tart list --quiet --source oci 2>/dev/null | awk -v n="$BASE" "\$0==n{f=1} END{exit !f}"' "cont pull"
+  chk "gold $GOLD"  'vm_exists "$GOLD"' "lab bake"
+  chk "mitm CA $CA_CERT" 'test -f "$CA_CERT"' "created on first lab run"
+  chk "tcpdump without password (pcap = ground truth)" 'tcpdump_ok' "echo '$SUDOERS_LINE' | sudo tee /etc/sudoers.d/crops-tcpdump"
+  chk ".env.crops (throwaway WALLET_PK)" 'test -f "$ENV_FILE"' "cp .env.crops.example .env.crops"
+  chk "wallet/ (unpacked extension)" 'test -d "$LAB_DIR/wallet" && ls "$LAB_DIR/wallet"/* ' "optional until a wallet action runs"
+  printf '\n%d ok, %d missing\n' "$ok" "$bad"
+  (( bad == 0 ))
+}
+
+cmd_bake() {
+  (( $(running_count) < 2 )) || die "2 VMs already running (tart cap) — stop one first"
+  # A failed bake must not leave crops-prep holding one of tart's 2 slots.
+  bake_cleanup() {
+    local rc=$?
+    if (( rc != 0 )) && vm_exists "$PREP"; then
+      log "bake failed (rc=$rc) — removing $PREP"
+      vm_running "$PREP" && "$CONT" down "$PREP" >/dev/null 2>&1 || true
+      "$CONT" rm "$PREP" >/dev/null 2>&1 || true
+    fi
+  }
+  trap bake_cleanup EXIT
+  vm_running "$VM" && { log "$VM is running — stopping it before bake"; graceful_stop "$VM"; }
+  if vm_exists "$PREP"; then
+    vm_running "$PREP" && graceful_stop "$PREP"
+    "$CONT" rm "$PREP" >/dev/null
+  fi
+  log "bake: $BASE -> $PREP -> $GOLD"
+  tart clone "$BASE" "$PREP"
+  "$CONT" up "$PREP"
+  wait_agent "$PREP"
+  ship_and_provision "$PREP" bake
+  # Pin everything the capture depends on, in the gold's own words.
+  mkdir -p "$LAB_DIR/gold"
+  {
+    echo "baked_at: $(date -u +%FT%TZ)"
+    echo "base: $BASE"
+    tart list --source oci 2>/dev/null | awk -v n="$BASE" '$2==n{print "base_row: "$0}'
+    guest_manifest "$PREP"
+  } > "$LAB_DIR/gold/manifest.txt"
+  graceful_stop "$PREP"
+  sleep 3
+  tart delete "$GOLD" >/dev/null 2>&1 || true
+  "$CONT" snapshot "$PREP" "$GOLD"
+  "$CONT" rm "$PREP"
+  log "gold ready: $GOLD"; cat "$LAB_DIR/gold/manifest.txt"
+}
+
+cmd_run() {
+  local action="${1:-}"; [[ -n "$action" ]] || die "usage: lab run <action>   (actions/: $(ls "$LAB_DIR/actions" | sed 's/\.js$//' | tr '\n' ' '))"
+  [[ -f "$LAB_DIR/actions/$action.js" ]] || die "no actions/$action.js"
+  vm_exists "$GOLD" || die "no $GOLD — run 'lab bake' first"
+  command -v mitmdump >/dev/null || die "mitmdump not installed (brew install mitmproxy)"
+  local run_id="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$action}"
+  local out="$OUT_ROOT/$run_id"; mkdir -p "$out"; RUN_LOG="$out/run.log"
+  log "run $run_id  action=$action  vm=$VM  out=$out"
+  ensure_ca
+
+  # 1. identical clean guest: delete whatever is there, clone gold.
+  if vm_exists "$VM"; then
+    vm_running "$VM" && graceful_stop "$VM"
+    "$CONT" rm "$VM" >/dev/null
+  fi
+  (( $(running_count) < 2 )) || die "2 VMs already running (tart cap)"
+  tart clone "$GOLD" "$VM"
+  "$CONT" up "$VM" >/dev/null
+  wait_agent "$VM"
+  local ip host_proxy
+  ip="$(tart ip "$VM" --wait 60 2>/dev/null || true)"; echo "${ip:-?}" > "$out/guest_ip"
+  host_proxy="$(bridge_ip)"; [[ -n "$host_proxy" ]] || die "bridge100 has no inet address"
+
+  # 2. host-side taps, outside the guest. Start before the proxy is pointed
+  #    at us so nothing in the guest ever sees a closed port.
+  local tcpdump_pid="" mitm_pid=""
+  if tcpdump_ok && [[ -n "$ip" ]]; then
+    sudo -n /usr/sbin/tcpdump -Z "$USER" -i bridge100 -U -q -w "$out/session.pcap" \
+      "host $ip" >"$out/tcpdump.log" 2>&1 &
+    sleep 1
+    tcpdump_pid="$(pgrep -u "$USER" -f "tcpdump -Z $USER -i bridge100" | head -1 || true)"
+    [[ -n "$tcpdump_pid" ]] && log "tcpdump on bridge100 (pid $tcpdump_pid)" || log "WARN: tcpdump did not start — see $out/tcpdump.log"
+  else
+    log "WARN: no passwordless tcpdump — NO PCAP, no ground truth this run. Fix: echo '$SUDOERS_LINE' | sudo tee /etc/sudoers.d/crops-tcpdump"
+    echo "no pcap: passwordless tcpdump not configured" > "$out/PCAP_SKIPPED"
+  fi
+  CROPS_OUT="$out" mitmdump --set "confdir=$CA_DIR" --listen-host "$host_proxy" --listen-port "$PROXY_PORT" \
+    -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
+  mitm_pid=$!
+  local i; for i in $(seq 1 20); do grep -q "listening" "$out/mitm.log" 2>/dev/null && break; sleep 0.5; done
+  kill -0 "$mitm_pid" 2>/dev/null || die "mitmdump died — see $out/mitm.log"
+  log "mitmdump on $host_proxy:$PROXY_PORT (pid $mitm_pid)"
+  cleanup() {
+    [[ -n "$mitm_pid" ]] && { kill -TERM "$mitm_pid" 2>/dev/null || true; wait "$mitm_pid" 2>/dev/null || true; }
+    [[ -n "$tcpdump_pid" ]] && { kill -INT "$tcpdump_pid" 2>/dev/null || true; sleep 1; }
+  }
+  trap cleanup EXIT
+
+  # 3. Tier 3 into the guest: CA, proxy -> us, actions, wallet, throwaway env.
+  ship_and_provision "$VM" run "$host_proxy" "$run_id"
+  # Prove the guest can reach the tap before spending an action on it.
+  if gx "$VM" curl -s -m 8 -o /dev/null -x "http://$host_proxy:$PROXY_PORT" https://example.com/; then
+    log "guest -> proxy -> internet: ok"
+  else
+    log "WARN: guest could not fetch through the proxy — run will likely be empty (host Local Network gate? mitm CA?)"
+  fi
+
+  # 4. the action. tart exec already runs inside the admin Aqua session.
+  log "action $action (timeout ${ACTION_TIMEOUT}s)"
+  local rc=0
+  timeout "$ACTION_TIMEOUT" tart exec "$VM" bash "/Users/admin/lab/run-action.sh" "$action" >"$out/driver.log" 2>&1 || rc=$?
+  case "$rc" in
+    0)   log "action finished" ;;
+    124) log "action TIMED OUT after ${ACTION_TIMEOUT}s" ;;
+    *)   log "action exited $rc — see $out/driver.log" ;;
+  esac
+
+  # 5. harvest what the guest wrote (screenshots, its own log) before it dies.
+  mkdir -p "$out/guest"
+  gx "$VM" sh -c 'cd ~/lab && tar cf - out 2>/dev/null' | tar xf - -C "$out/guest" 2>/dev/null \
+    || log "guest harvest: nothing to collect"
+
+  # 6. taps down, guest down (kept on disk for `lab shell`/`lab gui`; the
+  #    next run deletes it).
+  cleanup; trap - EXIT
+  graceful_stop "$VM"
+  {
+    echo "run_id: $run_id"; echo "action: $action"; echo "guest_ip: ${ip:-?}"; echo "host_proxy: $host_proxy:$PROXY_PORT"
+    echo "gold: $GOLD"; echo "action_rc: $rc"; sed 's/^/gold_/' "$LAB_DIR/gold/manifest.txt" 2>/dev/null
+  } > "$out/meta.txt"
+  cmd_summarize "$run_id"
+}
+
+cmd_summarize() {
+  local run_id="${1:-}"; [[ -n "$run_id" ]] || die "usage: lab summarize <run-id>"
+  local out="$OUT_ROOT/$run_id"; [[ -d "$out" ]] || die "no $out"
+  python3 "$LAB_DIR/capture/summarize.py" "$out" | tee "$out/summary.md"
+}
+
+cmd_status() {
+  echo "vm: $VM   gold: $GOLD   base: $BASE"
+  tart list 2>/dev/null | awk 'NR==1 || $1=="local"'
+  [[ -f "$LAB_DIR/gold/manifest.txt" ]] && { echo; cat "$LAB_DIR/gold/manifest.txt"; }
+  echo; echo "runs:"; ls -1t "$OUT_ROOT" 2>/dev/null | head -10 | sed 's/^/  /'
+}
+
+usage() {
+  cat <<EOF
+lab — CROPS Lab: capture every byte a wallet/dapp action sends, from outside the VM
+
+  lab doctor               check host prerequisites
+  lab bake                 build $GOLD from $BASE (one-time; re-run when Tier 1/2 changes)
+  lab run <action>         clone gold, sync Tier 3, tap, run actions/<action>.js, collect -> out/<run>/
+  lab summarize <run-id>   re-run the pcap/flows audit for a run
+  lab shell [cmd...]       tart exec into $VM (interactive zsh if no cmd)
+  lab gui                  VNC into $VM (cont open — the only GUI path on Tahoe)
+  lab status               VMs, gold manifest, recent runs
+  lab down | lab rm        stop / delete $VM
+
+env: VM GOLD CROPS_BASE CONT_DIR PROXY_PORT ACTION_TIMEOUT AGENT_WAIT RUN_ID
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    doctor)    cmd_doctor ;;
+    bake)      cmd_bake ;;
+    run)       cmd_run "$@" ;;
+    summarize) cmd_summarize "$@" ;;
+    status)    cmd_status ;;
+    shell|ssh) if (( $# )); then tart exec "$VM" "$@"; else tart exec -t "$VM" zsh -l; fi ;;
+    gui|open)  "$CONT" open "$VM" ;;
+    down)      graceful_stop "$VM" ;;
+    rm)        vm_running "$VM" && graceful_stop "$VM"; "$CONT" rm "$VM" ;;
+    ""|-h|--help|help) usage ;;
+    *) echo "unknown: $cmd" >&2; usage; exit 2 ;;
+  esac
+}
+main "$@"

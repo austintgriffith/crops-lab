@@ -1,0 +1,8 @@
+baked_at: 2026-08-21T02:54:20Z
+base: ghcr.io/cirruslabs/macos-tahoe-base:latest
+base_row: OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   33   1 hour ago   stopped
+macos: 26.6.2 (25G83)
+chrome: Google Chrome 151.0.7922.174 
+node: v26.7.0
+playwright: 1.62.1
+quic_allowed: 0

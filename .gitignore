@@ -1,0 +1,17 @@
+# captures — every file is sensitive (decrypted bodies)
+out/
+# the lab's mitm CA (private key lives here)
+ca/
+# unpacked wallet extensions (download, pin, do not vendor)
+wallet/
+# throwaway secrets
+.env.crops
+.env
+# misc
+*.pcap
+*.pem
+profile/
+.DS_Store
+
+__pycache__/
+*.pyc
