@@ -1,5 +1,9 @@
 # CROPS Lab — network & isolation profiler
 
+> **Status: built and validated.** Three routes capture end to end (send, ENS send, Aave supply).
+> This file is the design rationale; see [README.md](README.md) for use and
+> [docs/FINDINGS.md](docs/FINDINGS.md) for results.
+
 Sibling to the mapping system (`../strawmapuserflow`, site `../eta-public`). Its job: run a real wallet + browser + dapp inside a throwaway **macOS** VM, perform one action, and record **every byte in and out** — decrypted — then reduce that to the `ledger.tsv` the transit maps read. Maps are downstream; the lab's output is a JSON/TSV artifact.
 
 macOS because that's how people actually use crypto — same OS, same wallets, same apps. The VM is the CROPS boundary made literal; every distinct egress endpoint is a candidate leak / block / lie point, the exact thing the maps mark.

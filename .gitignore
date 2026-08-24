@@ -15,3 +15,6 @@ profile/
 
 __pycache__/
 *.pyc
+# throwaway seed phrase (scratch)
+.seed.tmp
+.seed*

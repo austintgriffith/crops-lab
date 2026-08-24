@@ -1,19 +1,12 @@
-// Action: send-eth — MetaMask, mainnet, send a tiny amount of ETH with
-// default settings, while the host captures every byte. THROWAWAY KEY ONLY.
+// Action: send-ens — route 02. Same ETH send as send-eth, but the recipient
+// is an ENS NAME, not a hex address. The delta from route 01 is the name
+// resolution: typing "name.eth" makes MetaMask resolve it (Infura eth_call to
+// the ENS registry/resolver, plus its name-lookup service) BEFORE the send —
+// that resolution traffic is what this route maps. Dry by default; the
+// resolution fires at recipient-entry, so no broadcast is needed to capture it.
 //
-// Assumes the wallet already exists: this clones crops-warm (built by `lab
-// warm`), so ~/lab/wallet-profile is already onboarded with the throwaway key
-// imported. We only UNLOCK and send — never onboard here. The network capture
-// around the send is the product; the UI dance is the cost of getting it.
-// Referencing "wallet-profile" below is also the flag `lab run` greps for to
-// know it must clone crops-warm instead of crops-gold.
-//
-// Default recipient is our own address (self-send): it exercises the entire
-// route-01 path — nonce, gas oracle, simulation, security alert, broadcast,
-// STX status — while the ETH returns minus gas. Override with SEND_TO.
-//
-// Selectors are MetaMask 13.45.0 data-testids. Same defensive helpers as
-// setup-wallet.js: try testid, screenshot, dump testids on a miss.
+// Clones crops-warm (references "wallet-profile", the flag `lab run` greps for).
+// Selectors are MetaMask 13.45.0. Same defensive helpers as send-eth.
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
@@ -24,7 +17,7 @@ const PROFILE = path.join(LAB, "wallet-profile");
 const EXT = process.env.WALLET_EXT || path.join(LAB, "wallet", "metamask");
 const PROXY = `http://${process.env.HOST_PROXY}:${process.env.PROXY_PORT}`;
 const PASSWORD = process.env.WALLET_PASSWORD || "";
-const TO = process.env.SEND_TO || process.env.WALLET_ADDR || "";
+const TO = process.env.SEND_ENS || "ens.eth";     // an ENS name; MetaMask resolves it
 const AMOUNT_ETH = process.env.SEND_AMOUNT_ETH || "0.0002";
 // Safety gate: the final Confirm broadcasts a real mainnet tx (spends gas).
 // Default is a DRY run — reach the confirm screen (which already fires
@@ -173,8 +166,12 @@ async function fillAny(page, sels, value, label) {
   }
   await page.waitForTimeout(1500);
   await shot(page, "send-to");
+  console.log(`  recipient is an ENS name: ${TO}`);
   await fillAny(page, ["recipient-address-input", "recipient-address", "ens-input", "#address", "textarea"], TO, "recipient");
-  await page.waitForTimeout(1500);   // recipient screening (security-alerts) fires here
+  // ENS resolution fires now: Infura eth_call to the ENS registry/resolver +
+  // MetaMask's name-lookup service. Give it room and capture the resolved state.
+  await page.waitForTimeout(4000);
+  await shot(page, "ens-resolved");
   await fillAny(page, ['input[placeholder="0"]', "amount-input-field", "amount-input", "currency-input", "#amount"], AMOUNT_ETH, "amount");
   await page.waitForTimeout(1500);
   await shot(page, "amount");

@@ -44,6 +44,7 @@ def response(flow):
             hdrs_kept[lk] = v
     rec = {
         "ts": round(time.time() - _t0, 3),
+        "t": round(time.time(), 3),
         "method": req.method,
         "scheme": req.scheme,
         "host": req.pretty_host,             # SNI / Host, the real destination

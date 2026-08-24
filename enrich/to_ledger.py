@@ -18,16 +18,37 @@ from collections import OrderedDict
 
 # host regex -> (owner, kind). Checked-in ground truth; grow it, never guess inline.
 PARTIES = [
-    (r"\.api\.cx\.metamask\.io$", "Consensys (MetaMask backends)", "op"),
-    (r"^mainnet\.infura\.io$", "Consensys (Infura RPC)", "op"),
+    # order matters: more specific patterns first.
     (r"security-alerts\.api\.cx", "Blockaid", "op"),
-    (r"^clients?\d*\.google\.com$", "Google", "op"),
+    (r"\.cx\.metamask\.io$", "Consensys (MetaMask backends)", "op"),   # api.cx + static.cx
+    (r"\.execution\.metamask\.io$", "Consensys (MetaMask backends)", "op"),
+    (r"^metamask\.github\.io$", "MetaMask (GitHub Pages)", "edge"),
+    (r"\.infura\.io$", "Consensys (Infura RPC)", "op"),                # all chains, mainnet + L2s + testnets
     (r"^etherscan\.io$", "Etherscan", "op"),
     (r"\.g\.alchemy\.com$", "Alchemy", "op"),
     (r"amplitude\.com$", "Amplitude", "op"),
     (r"segment\.io$", "Segment", "op"),
     (r"sentry\.io$", "Sentry", "op"),
     (r"metadata\.ens\.domains$", "ENS metadata service", "op"),
+    # --- dapp surface (route 03, Aave supply) ---
+    (r"aave\.com$", "Aave (Avara) frontend/API", "op"),
+    (r"aavechan\.com$", "Aave Chan Initiative", "op"),
+    (r"tenderly\.co$", "Tenderly (RPC + simulation)", "op"),
+    (r"walletconnect\.(org|com)$", "WalletConnect (Reown)", "op"),
+    (r"moonpay\.com$", "MoonPay (fiat on-ramp)", "op"),
+    (r"coinbase\.com$", "Coinbase (on-ramp)", "op"),
+    (r"datadoghq\.com$", "Datadog (RUM telemetry)", "op"),
+    (r"cloudflareinsights\.com$", "Cloudflare (web analytics)", "edge"),
+    (r"4byte\.directory$", "4byte.directory (calldata sig registry)", "op"),
+    (r"fun\.xyz$", "fun.xyz (gas abstraction SDK)", "op"),
+    (r"family\.co$", "Family (ConnectKit UI)", "op"),
+    (r"googleapis\.com$", "Google", "op"),
+    (r"\.google\.com$", "Google", "op"),                              # clients2/accounts/www/android.clients
+    (r"contentful\.com$", "Contentful (CMS)", "op"),
+    (r"^chainid\.network$", "ethereum-lists (chainid.network)", "op"),
+    (r"^api\.merkl\.xyz$", "Merkl (Angle Labs)", "op"),
+    (r"^example\.com$", "lab proxy-connectivity probe (not wallet)", "op"),
+    (r"\.apple\.com$", "Apple (macOS background — not wallet)", "os"),
     (r"apps\.aavechan\.com$", "Aave Chan Initiative", "op"),
     (r"^app\.aave\.com$", "Aave frontend (Cloudflare)", "edge"),
 ]

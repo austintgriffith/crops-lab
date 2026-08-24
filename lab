@@ -57,6 +57,9 @@ UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
 BASE="${CROPS_BASE:-$UPSTREAM_BASE}"
 VM="${VM:-crops}"
 GOLD="${GOLD:-${VM}-gold}"
+WALLET="${WALLET:-metamask}"      # which wallet/<name> extension: metamask | rainbow
+if [[ "$WALLET" == "metamask" ]]; then WARM="${WARM:-${VM}-warm}"; else WARM="${WARM:-${VM}-warm-${WALLET}}"; fi  # gold + wallet onboarded + throwaway key imported
+SETUP_ACTION="$([[ "$WALLET" == "metamask" ]] && echo setup-wallet || echo "setup-${WALLET}")"
 PREP="${VM}-prep"
 OUT_ROOT="$LAB_DIR/out"
 CA_DIR="$LAB_DIR/ca"
@@ -124,7 +127,7 @@ ship_and_provision() {
   cp -R "$LAB_DIR/actions" "$stage/crops/actions"
   if [[ "$mode" == "run" ]]; then
     cp "$CA_CERT" "$stage/crops/mitm-ca-cert.pem"
-    printf 'HOST_PROXY=%s\nPROXY_PORT=%s\nRUN_ID=%s\n' "$host_proxy" "$PROXY_PORT" "$run_id" > "$stage/crops/run.env"
+    printf 'HOST_PROXY=%s\nPROXY_PORT=%s\nRUN_ID=%s\nWALLET=%s\n' "$host_proxy" "$PROXY_PORT" "$run_id" "$WALLET" > "$stage/crops/run.env"
     [[ -f "$ENV_FILE" ]] && install -m 600 "$ENV_FILE" "$stage/crops/.env.crops"
     [[ -d "$LAB_DIR/wallet" ]] && cp -R "$LAB_DIR/wallet" "$stage/crops/wallet"
   fi
@@ -227,6 +230,44 @@ cmd_bake() {
   log "gold ready: $GOLD"; cat "$LAB_DIR/gold/manifest.txt"
 }
 
+# Build crops-warm: clone gold, install MetaMask, onboard + import the
+# throwaway key, snapshot. Identity-BEARING on purpose (a wallet that exists
+# and gets funded) — it lives only on this disk, never pushed. `lab run
+# send-eth` clones it so it never has to onboard, only unlock.
+cmd_warm() {
+  vm_exists "$GOLD" || die "no $GOLD — run 'lab bake' first"
+  [[ -d "$LAB_DIR/wallet/$WALLET" ]] || die "no wallet/$WALLET — download+unpack the extension first"
+  [[ -f "$ENV_FILE" ]] || die "no .env.crops (need WALLET_PK + WALLET_PASSWORD)"
+  [[ -f "$LAB_DIR/actions/$SETUP_ACTION.js" ]] || die "no actions/$SETUP_ACTION.js"
+  ensure_ca
+  local wprep="${VM}-warmprep"
+  local out="$OUT_ROOT/warm-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$out"; RUN_LOG="$out/run.log"
+  log "warm: $GOLD -> $wprep (onboard $WALLET, import key) -> snapshot $WARM"
+  if vm_exists "$wprep"; then vm_running "$wprep" && graceful_stop "$wprep"; "$CONT" rm "$wprep" >/dev/null; fi
+  (( $(running_count) < 2 )) || die "2 VMs already running (tart cap) — stop one first"
+  tart clone "$GOLD" "$wprep"
+  "$CONT" up "$wprep" >/dev/null
+  wait_agent "$wprep"
+  # Tier 3 with NO proxy (host_proxy=""): trust the CA, ship wallet + key +
+  # actions. Onboarding is local crypto; there is nothing to capture here.
+  ship_and_provision "$wprep" run "" "warm"
+  log "onboarding (timeout ${ACTION_TIMEOUT}s) — screenshots land in $out/guest/out"
+  local rc=0
+  timeout "$ACTION_TIMEOUT" tart exec "$wprep" bash "/Users/admin/lab/run-action.sh" "$SETUP_ACTION" >"$out/driver.log" 2>&1 || rc=$?
+  mkdir -p "$out/guest"
+  gx "$wprep" sh -c 'cd ~/lab && tar cf - out 2>/dev/null' | tar xf - -C "$out/guest" 2>/dev/null || true
+  if (( rc != 0 )); then
+    graceful_stop "$wprep"
+    die "$SETUP_ACTION exited $rc — see $out/driver.log and $out/guest/out (screenshots + diag-*.txt). $wprep kept for 'lab gui'. Fix, then re-run 'lab warm'."
+  fi
+  log "onboarding ok — snapshotting $WARM"
+  graceful_stop "$wprep"; sleep 3
+  tart delete "$WARM" >/dev/null 2>&1 || true
+  "$CONT" snapshot "$wprep" "$WARM"
+  "$CONT" rm "$wprep"
+  log "warm ready: $WARM. Fund $(grep -m1 '^WALLET_ADDR=' "$ENV_FILE" 2>/dev/null | cut -d= -f2), then: lab run send-eth"
+}
+
 cmd_run() {
   local action="${1:-}"; [[ -n "$action" ]] || die "usage: lab run <action>   (actions/: $(ls "$LAB_DIR/actions" | sed 's/\.js$//' | tr '\n' ' '))"
   [[ -f "$LAB_DIR/actions/$action.js" ]] || die "no actions/$action.js"
@@ -234,7 +275,20 @@ cmd_run() {
   command -v mitmdump >/dev/null || die "mitmdump not installed (brew install mitmproxy)"
   local run_id="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$action}"
   local out="$OUT_ROOT/$run_id"; mkdir -p "$out"; RUN_LOG="$out/run.log"
-  log "run $run_id  action=$action  vm=$VM  out=$out"
+  # Base image: crops-gold by default. Wallet actions (they touch the
+  # persistent wallet-profile) auto-clone crops-warm instead, which already
+  # has the onboarded wallet. Override with FROM=<image>.
+  local aw; aw="$(grep -m1 -oE '^// wallet: [a-z]+' "$LAB_DIR/actions/$action.js" 2>/dev/null | awk '{print $3}')"
+  if [[ -n "$aw" && "$aw" != "$WALLET" ]]; then
+    WALLET="$aw"; [[ "$WALLET" == "metamask" ]] && WARM="${VM}-warm" || WARM="${VM}-warm-${WALLET}"
+    log "action declares wallet: $WALLET -> warm image $WARM"
+  fi
+  local from="${FROM:-$GOLD}"
+  if [[ -z "${FROM:-}" ]] && vm_exists "$WARM" && grep -q wallet-profile "$LAB_DIR/actions/$action.js" 2>/dev/null; then
+    from="$WARM"; log "action needs the wallet — cloning $WARM (not $GOLD)"
+  fi
+  vm_exists "$from" || die "no base image $from"
+  log "run $run_id  action=$action  from=$from  vm=$VM  out=$out"
   ensure_ca
 
   # 1. identical clean guest: delete whatever is there, clone gold.
@@ -243,7 +297,7 @@ cmd_run() {
     "$CONT" rm "$VM" >/dev/null
   fi
   (( $(running_count) < 2 )) || die "2 VMs already running (tart cap)"
-  tart clone "$GOLD" "$VM"
+  tart clone "$from" "$VM"
   "$CONT" up "$VM" >/dev/null
   wait_agent "$VM"
   local ip host_proxy
@@ -305,7 +359,7 @@ cmd_run() {
   graceful_stop "$VM"
   {
     echo "run_id: $run_id"; echo "action: $action"; echo "guest_ip: ${ip:-?}"; echo "host_proxy: $host_proxy:$PROXY_PORT"
-    echo "gold: $GOLD"; echo "action_rc: $rc"; sed 's/^/gold_/' "$LAB_DIR/gold/manifest.txt" 2>/dev/null
+    echo "base_image: $from"; echo "action_rc: $rc"; sed 's/^/gold_/' "$LAB_DIR/gold/manifest.txt" 2>/dev/null
   } > "$out/meta.txt"
   cmd_summarize "$run_id"
 }
@@ -329,14 +383,15 @@ lab — CROPS Lab: capture every byte a wallet/dapp action sends, from outside t
 
   lab doctor               check host prerequisites
   lab bake                 build $GOLD from $BASE (one-time; re-run when Tier 1/2 changes)
-  lab run <action>         clone gold, sync Tier 3, tap, run actions/<action>.js, collect -> out/<run>/
+  lab warm                 build $WARM from gold: onboard MetaMask + import the throwaway key, snapshot
+  lab run <action>         clone gold (or $WARM for wallet actions), tap, run actions/<action>.js -> out/<run>/
   lab summarize <run-id>   re-run the pcap/flows audit for a run
   lab shell [cmd...]       tart exec into $VM (interactive zsh if no cmd)
   lab gui                  VNC into $VM (cont open — the only GUI path on Tahoe)
   lab status               VMs, gold manifest, recent runs
   lab down | lab rm        stop / delete $VM
 
-env: VM GOLD CROPS_BASE CONT_DIR PROXY_PORT ACTION_TIMEOUT AGENT_WAIT RUN_ID
+env: VM GOLD WARM WALLET FROM CROPS_BASE CONT_DIR PROXY_PORT ACTION_TIMEOUT AGENT_WAIT RUN_ID
 EOF
 }
 
@@ -345,6 +400,7 @@ main() {
   case "$cmd" in
     doctor)    cmd_doctor ;;
     bake)      cmd_bake ;;
+    warm)      cmd_warm ;;
     run)       cmd_run "$@" ;;
     summarize) cmd_summarize "$@" ;;
     status)    cmd_status ;;

@@ -50,13 +50,19 @@ if [[ "$FAST" != "1" ]]; then
   echo "==> tier 2: node"
   brew list node >/dev/null 2>&1 || brew install node
 
-  echo "==> tier 2: playwright (drives the REAL installed Chrome via channel:'chrome')"
+  echo "==> tier 2: playwright"
   mkdir -p "$LAB"
   ( cd "$LAB"
     [[ -f package.json ]] || npm init -y >/dev/null
     # Exact version is pinned by the package-lock this writes; `lab bake`
     # copies the resolved versions into gold-manifest.txt on the host.
     npm ls playwright >/dev/null 2>&1 || npm i --no-audit --no-fund playwright >/dev/null
+    # Bundled Chromium — REQUIRED for wallet actions. Google Chrome 128+
+    # blocks --load-extension from the command line (verified dead on Chrome
+    # 151), so an unpacked MetaMask can't be loaded into channel:'chrome'.
+    # Chromium shares Chrome's network stack, so the wallet's request traffic
+    # is identical; only wallet actions use it, smoke still uses real Chrome.
+    npx --yes playwright install chromium >/dev/null 2>&1 || echo "WARN: playwright chromium install failed" >&2
   )
 
   # Chrome managed policy: no QUIC/HTTP-3 anywhere in this guest, so nothing
