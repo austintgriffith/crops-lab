@@ -278,7 +278,8 @@ cmd_run() {
   # Base image: crops-gold by default. Wallet actions (they touch the
   # persistent wallet-profile) auto-clone crops-warm instead, which already
   # has the onboarded wallet. Override with FROM=<image>.
-  local aw; aw="$(grep -m1 -oE '^// wallet: [a-z]+' "$LAB_DIR/actions/$action.js" 2>/dev/null | awk '{print $3}')"
+  # awk (not grep -m1) so a no-match can't trip pipefail; empty = default metamask.
+  local aw; aw="$(awk '/^\/\/ wallet: [a-z]+/{print $3; exit}' "$LAB_DIR/actions/$action.js" 2>/dev/null)"
   if [[ -n "$aw" && "$aw" != "$WALLET" ]]; then
     WALLET="$aw"; [[ "$WALLET" == "metamask" ]] && WARM="${VM}-warm" || WARM="${VM}-warm-${WALLET}"
     log "action declares wallet: $WALLET -> warm image $WARM"

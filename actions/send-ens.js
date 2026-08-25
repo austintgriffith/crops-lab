@@ -136,7 +136,11 @@ async function fillAny(page, sels, value, label) {
   await shot(page, "open");
 
   // Unlock if the lock screen is up (a snapshot boot usually locks the vault).
-  if (await page.locator(sel("unlock-password")).first().isVisible().catch(() => false)) {
+  // Wait for the field to actually mount before deciding — checking isVisible
+  // the instant the page loads races React and silently skips the unlock.
+  const locked = await page.locator(sel("unlock-password")).first()
+    .waitFor({ state: "visible", timeout: 15000 }).then(() => true).catch(() => false);
+  if (locked) {
     await fillAny(page, ["unlock-password"], PASSWORD, "unlock-pw");
     await clickAny(page, ["unlock-submit"], "unlock");
     await page.waitForTimeout(2500);

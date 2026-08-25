@@ -40,7 +40,11 @@ async function resolveExt(ctx, ms = 90000) {
   return null;
 }
 async function unlockIfNeeded(p) {
-  if (await p.locator('[data-testid="unlock-password"]').first().isVisible().catch(() => false)) {
+  // Wait for the lock screen to mount before deciding — a bare isVisible races
+  // React on a fresh boot and skips the unlock while the wallet is still locked.
+  const locked = await p.locator('[data-testid="unlock-password"]').first()
+    .waitFor({ state: "visible", timeout: 15000 }).then(() => true).catch(() => false);
+  if (locked) {
     await p.locator('[data-testid="unlock-password"]').fill(PASSWORD);
     await p.locator('[data-testid="unlock-submit"]').click();
     await p.waitForTimeout(2500);

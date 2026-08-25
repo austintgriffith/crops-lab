@@ -29,8 +29,10 @@ const BROADCAST = process.env.SEND_BROADCAST === "1";
   await page.waitForTimeout(2000);
   await shot(page, "open"); await dumpTestIds(page, "open");
 
-  // Unlock
-  if (await page.locator('[data-testid="password-input"]').first().isVisible().catch(() => false)) {
+  // Unlock — wait for the lock screen to mount so a slow boot can't skip it.
+  const locked = await page.locator('[data-testid="password-input"]').first()
+    .waitFor({ state: "visible", timeout: 15000 }).then(() => true).catch(() => false);
+  if (locked) {
     await fillAny(page, ["password-input"], PASSWORD, "unlock-pw");
     await clickAny(page, ["unlock-button", "role:Unlock", "role:Continue"], "unlock", { optional: true, timeout: 5000 })
       || await page.keyboard.press("Enter");
