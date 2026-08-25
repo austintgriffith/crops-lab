@@ -159,23 +159,32 @@ async function fillAny(page, sels, value, label) {
   await page.waitForTimeout(2000);
 
   // 3. Open the destination token chip — the network selector lives inside it.
-  //    Screenshot the picker so we can see the network-switch UI, then try Base.
-  const opened = await clickAny(page, [
+  //    The chip is the pill on the RIGHT of the "You receive" row (~x=905,
+  //    y=210 at 1200x800). Click by position since it has no stable testid.
+  let opened = await clickAny(page, [
     "prepare-swap-page-swap-to", "destination-token-button", "swap-to-token-button",
     "prepare-swap-page-swap-to-token",
-  ], "open-dest-picker", { optional: true, timeout: 8000 });
-  if (opened) {
-    await page.waitForTimeout(1500);
-    await shot(page, "dest-picker"); await dumpTestids(page, "dest-picker");
-    // Network selector: a tab/chip/row naming the L2. Try several shapes.
-    await clickAny(page, [
-      `text:${TO_CHAIN}`, "network-Base", "chain-8453", "multichain-network-Base",
-    ], "pick-dest-network", { optional: true, timeout: 8000 });
-    await page.waitForTimeout(1500);
-    await shot(page, "after-network"); await dumpTestids(page, "after-network");
-    // Then a destination token on that chain (default ETH).
-    await clickAny(page, ["text:Ethereum", "text:ETH"], "pick-dest-token", { optional: true, timeout: 6000 });
+  ], "open-dest-picker", { optional: true, timeout: 5000 });
+  if (!opened) {
+    await page.mouse.click(905, 210).catch(() => {});
+    console.log("  open-dest-picker: clicked dest chip by position");
+    opened = true;
   }
+  await page.waitForTimeout(2000);
+  await shot(page, "dest-picker"); await dumpTestids(page, "dest-picker");
+  // The picker is "Select token" with an "All networks" FILTER at the top —
+  // that's the network switch. Open it, choose the L2, then the list shows that
+  // chain's tokens; pick ETH on the L2 to make it a bridge.
+  await clickAny(page, ['text:All networks', 'text:Networks', "network-filter"], "open-network-filter", { optional: true, timeout: 6000 });
+  await page.waitForTimeout(1500);
+  await shot(page, "network-list"); await dumpTestids(page, "network-list");
+  await clickAny(page, [`text:${TO_CHAIN}`], "pick-network", { optional: true, timeout: 6000 });
+  await page.waitForTimeout(2000);
+  await shot(page, "after-network");
+  // Now the token list is filtered to the L2; pick the ETH token ROW — click
+  // "Ether" (the row subtitle), NOT "Ethereum" (that's the network-filter chip
+  // and re-clicking it reverts the filter to mainnet).
+  await clickAny(page, ["text:Ether\n", "text:Ether", "text:ETH"], "pick-dest-token", { optional: true, timeout: 6000 });
   // Quotes settle (bridge.api.cx.metamask.io/getQuoteStream). Wait for the CTA.
   await page.waitForTimeout(10000);
   await shot(page, "quotes"); await dumpTestids(page, "quotes");
