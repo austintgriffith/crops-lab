@@ -1,0 +1,210 @@
+// wallet: metamask
+// Action: swap-metamask — route M4. MetaMask's BUILT-IN Swap (not a dapp).
+// This is the swap most people actually do: in-wallet, no site connect. It
+// exposes MetaMask's own swap surface — the quote/aggregator API
+// (swap.api.cx.metamask.io / *.metaswap.*), the fee MetaMask takes, gas, and
+// the broadcast — all while the host captures every byte.
+//
+// ETH -> USDC on mainnet: ETH is native, so NO token approval is needed (the
+// simplest swap to capture). Clones crops-warm (the "wallet-profile" / //
+// wallet: metamask flags tell `lab run` to use the onboarded MetaMask image).
+//
+// Selectors are MetaMask 13.45 data-testids with text fallbacks; on any miss
+// the driver screenshots + dumps testids (out/diag-*.txt) so we can iterate.
+// Dry by default: drive to the swap review/confirm screen (which already fires
+// quotes, gas, fee) and STOP. Set SWAP_BROADCAST=1 (with go-ahead) to submit.
+const { chromium } = require("playwright");
+const fs = require("fs");
+const path = require("path");
+
+const LAB = path.join(process.env.HOME, "lab");
+const OUT = path.join(LAB, "out");
+const PROFILE = path.join(LAB, "wallet-profile");
+const EXT = process.env.WALLET_EXT || path.join(LAB, "wallet", "metamask");
+const PROXY = `http://${process.env.HOST_PROXY}:${process.env.PROXY_PORT}`;
+const PASSWORD = process.env.WALLET_PASSWORD || "";
+const FROM_SYM = process.env.SWAP_FROM || "ETH";
+const TO_SYM = process.env.SWAP_TO || "USDC";
+const AMOUNT = process.env.SWAP_AMOUNT || "0.002";
+const BROADCAST = process.env.SWAP_BROADCAST === "1";
+
+let step = 0;
+const shot = async (page, name) => {
+  const f = path.join(OUT, `sw-${String(++step).padStart(2, "0")}-${name}.png`);
+  try { await page.screenshot({ path: f }); } catch {}
+};
+const sel = (s) => (/[.#\[]/.test(s) ? s : `[data-testid="${s}"]`);
+
+const EXT_ARGS = [
+  `--disable-extensions-except=${EXT}`,
+  `--load-extension=${EXT}`,
+  "--disable-features=DisableLoadExtensionCommandLineSwitch",
+  "--disable-quic", "--no-first-run", "--no-default-browser-check",
+];
+
+async function resolveExt(ctx, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const sw = ctx.serviceWorkers().find((w) => w.url().startsWith("chrome-extension://"));
+    if (sw) return new URL(sw.url()).host;
+    const pg = ctx.pages().find((p) => p.url().startsWith("chrome-extension://"));
+    if (pg) return new URL(pg.url()).host;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+async function dumpTestids(page, label) {
+  try {
+    const data = await page.evaluate(() => {
+      const ids = [...document.querySelectorAll("[data-testid]")].map((e) => e.getAttribute("data-testid"));
+      const btns = [...document.querySelectorAll("button, a[role=button]")].map((e) => (e.innerText || "").trim()).filter(Boolean);
+      return { ids: [...new Set(ids)], btns: [...new Set(btns)], url: location.href };
+    });
+    fs.writeFileSync(path.join(OUT, `diag-${label}.txt`),
+      `url: ${data.url}\n\ntestids:\n${data.ids.join("\n")}\n\nbutton text:\n${data.btns.join("\n")}\n`);
+  } catch {}
+}
+
+async function clickAny(page, sels, label, { optional = false, timeout = 12000 } = {}) {
+  const list = Array.isArray(sels) ? sels : [sels];
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (const s of list) {
+      const loc = s.startsWith("text:") ? page.getByText(s.slice(5), { exact: false }).first() : page.locator(sel(s)).first();
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.click().catch(() => {});
+        console.log(`  click ${label}: ${s}`);
+        await page.waitForTimeout(600);
+        return true;
+      }
+    }
+    await page.waitForTimeout(400);
+  }
+  if (optional) { console.log(`  skip ${label} (not present)`); return false; }
+  await shot(page, `FAIL-${label}`);
+  await dumpTestids(page, label);
+  throw new Error(`swap-metamask: could not find "${label}" (tried: ${list.join(", ")})`);
+}
+
+async function fillAny(page, sels, value, label) {
+  const list = Array.isArray(sels) ? sels : [sels];
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    for (const s of list) {
+      const loc = page.locator(sel(s)).first();
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.click().catch(() => {});
+        await loc.fill(value).catch(() => {});
+        console.log(`  fill ${label}: ${s}`);
+        return true;
+      }
+    }
+    await page.waitForTimeout(400);
+  }
+  await shot(page, `FAIL-${label}`);
+  await dumpTestids(page, label);
+  throw new Error(`swap-metamask: could not find input "${label}" (tried: ${list.join(", ")})`);
+}
+
+(async () => {
+  fs.mkdirSync(OUT, { recursive: true });
+  if (!fs.existsSync(path.join(EXT, "manifest.json"))) { console.error(`no extension at ${EXT}`); process.exit(2); }
+  if (!fs.existsSync(PROFILE)) { console.error(`no ${PROFILE} — run 'lab warm' first`); process.exit(2); }
+  if (!PASSWORD) { console.error("WALLET_PASSWORD missing in ~/lab/.env"); process.exit(2); }
+
+  const ctxOpts = {
+    headless: false,
+    args: EXT_ARGS,
+    viewport: { width: 1200, height: 800 },
+    permissions: ["clipboard-read", "clipboard-write"],
+  };
+  if (process.env.HOST_PROXY) ctxOpts.proxy = { server: PROXY };
+  const ctx = await chromium.launchPersistentContext(PROFILE, ctxOpts);
+
+  const extId = await resolveExt(ctx);
+  if (!extId) { console.error("swap-metamask: extension never loaded"); process.exit(1); }
+  console.log("swap-metamask: ext", extId, "· swap", AMOUNT, FROM_SYM, "->", TO_SYM, "· broadcast", BROADCAST);
+
+  const page = await ctx.newPage();
+  await page.goto(`chrome-extension://${extId}/home.html`, { waitUntil: "load" });
+  await page.waitForTimeout(2000);
+  await shot(page, "open");
+
+  // Unlock — wait for the lock field to mount before deciding (avoids the race).
+  const locked = await page.locator(sel("unlock-password")).first()
+    .waitFor({ state: "visible", timeout: 15000 }).then(() => true).catch(() => false);
+  if (locked) {
+    await fillAny(page, ["unlock-password"], PASSWORD, "unlock-pw");
+    await clickAny(page, ["unlock-submit"], "unlock");
+    await page.waitForTimeout(2500);
+  }
+  await page.waitForTimeout(6000);   // let background calls (flags, tokens, prices, balances) fire
+  await shot(page, "home");
+
+  // 1. Open Swap. Home shows a Buy/Swap/Bridge/Send/Receive button row.
+  await clickAny(page, [
+    "token-overview-button-swap", "eth-overview-button-swap", "coin-overview-button-swap",
+    "wallet-swap", "swap-button", "text:Swap",
+  ], "open-swap");
+  await page.waitForTimeout(3000);
+  await shot(page, "swap-page"); await dumpTestids(page, "swap-page");
+
+  // 2. Amount to pay (source defaults to ETH). The receive token auto-defaults
+  //    (MetaMask fills its OWN mUSD stablecoin) and quotes auto-load on the same
+  //    page — no picker needed for the default. The 0.875% MetaMask fee and the
+  //    mUSD self-default are themselves the finding.
+  await fillAny(page, [
+    "prepare-swap-page-from-token-amount", "textfield", 'input[placeholder="0"]',
+    "swap-from-amount", "from-token-amount",
+  ], AMOUNT, "from-amount");
+  await page.waitForTimeout(2000);
+
+  // 3. OPTIONAL: change the receive token from the mUSD default to TO_SYM. If
+  //    SWAP_PICK_TO is set and the picker is present; otherwise take the default.
+  if (process.env.SWAP_PICK_TO) {
+    const opened = await clickAny(page, [
+      "prepare-swap-page-swap-to", "destination-token-button", "swap-to-token-button",
+    ], "open-to-picker", { optional: true, timeout: 6000 });
+    if (opened) {
+      await fillAny(page, ["search-token-input", 'input[placeholder*="Search"]', 'input[type="search"]'], TO_SYM, "search-to").catch(() => {});
+      await page.waitForTimeout(2000);
+      await clickAny(page, [`text:${TO_SYM}`], "pick-to", { optional: true, timeout: 6000 });
+    }
+  }
+  // Quotes settle (swap.api.cx.metamask.io / *.metaswap.*). Wait for the CTA.
+  await page.waitForTimeout(9000);
+  await shot(page, "quotes");
+
+  if (!BROADCAST) {
+    console.log("swap-metamask: DRY run — reached the quoted swap screen, NOT broadcasting (SWAP_BROADCAST=1 to submit)");
+    fs.writeFileSync(path.join(OUT, "swap.txt"), `MODE: dry\nfrom: ${AMOUNT} ${FROM_SYM}\n`);
+    await page.waitForTimeout(2000);
+    await ctx.close();
+    return;
+  }
+
+  // 4. Confirm. On the quoted page the primary CTA reads "Swap" (ETH->token
+  //    needs no approval). A confirm/summary screen may follow.
+  const confirmed = await clickAny(page, [
+    "swap-button", "confirm-swap-button", "swap-footer-button", "text:Swap", "text:Confirm",
+  ], "confirm-swap", { optional: true, timeout: 15000 });
+  console.log("  confirm-swap clicked:", confirmed);
+  await page.waitForTimeout(2500);
+  await shot(page, "post-swap-click");
+  // Some builds show a final confirmation screen with its own Confirm/Swap.
+  await clickAny(page, ["confirm-swap-button", "swap-button", "text:Confirm", "text:Swap"], "final-confirm", { optional: true, timeout: 6000 });
+  await page.waitForTimeout(10000);   // broadcast + status
+  await shot(page, "submitted");
+  let txhash = "";
+  try {
+    const href = await page.locator('a[href*="/tx/0x"]').first().getAttribute("href").catch(() => "");
+    const m = (href || "").match(/0x[a-fA-F0-9]{64}/);
+    if (m) txhash = m[0];
+  } catch {}
+  fs.writeFileSync(path.join(OUT, "swap.txt"),
+    `MODE: broadcast\nswap: ${AMOUNT} ${FROM_SYM} -> ${TO_SYM}\ntxhash: ${txhash || "(see flows.jsonl)"}\n`);
+  console.log("swap-metamask: submitted; txhash", txhash || "(see flows.jsonl)");
+  await page.waitForTimeout(4000);
+  await ctx.close();
+})().catch((e) => { console.error("swap-metamask failed:", e.message || e); process.exit(1); });
