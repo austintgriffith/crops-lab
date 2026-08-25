@@ -248,12 +248,37 @@ cmd_warm() {
   tart clone "$GOLD" "$wprep"
   "$CONT" up "$wprep" >/dev/null
   wait_agent "$wprep"
-  # Tier 3 with NO proxy (host_proxy=""): trust the CA, ship wallet + key +
-  # actions. Onboarding is local crypto; there is nothing to capture here.
-  ship_and_provision "$wprep" run "" "warm"
+  # Onboard THROUGH the proxy + capture. EOA wallets derive their address
+  # locally, but a smart-account wallet (Ambire) MUST reach its relayer during
+  # onboarding to derive the counterfactual account — with no route that step
+  # fails ("could not derive the accounts"). Routing warm through mitmproxy
+  # gives onboarding a network path AND captures the derive, which is itself a
+  # centralization finding. Same tap block as cmd_run.
+  local ip host_proxy tcpdump_pid="" mitm_pid=""
+  ip="$(tart ip "$wprep" --wait 60 2>/dev/null || true)"; echo "${ip:-?}" > "$out/guest_ip"
+  host_proxy="$(bridge_ip)"; [[ -n "$host_proxy" ]] || die "bridge100 has no inet address"
+  if tcpdump_ok && [[ -n "$ip" ]]; then
+    sudo -n /usr/sbin/tcpdump -Z "$USER" -i bridge100 -U -q -w "$out/session.pcap" "host $ip" >"$out/tcpdump.log" 2>&1 &
+    sleep 1; tcpdump_pid="$(pgrep -u "$USER" -f "tcpdump -Z $USER -i bridge100" | head -1 || true)"
+  fi
+  CROPS_OUT="$out" mitmdump --set "confdir=$CA_DIR" --listen-host "$host_proxy" --listen-port "$PROXY_PORT" \
+    -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
+  mitm_pid=$!
+  local i; for i in $(seq 1 20); do grep -q "listening" "$out/mitm.log" 2>/dev/null && break; sleep 0.5; done
+  kill -0 "$mitm_pid" 2>/dev/null || die "mitmdump died — see $out/mitm.log"
+  log "mitmdump on $host_proxy:$PROXY_PORT (pid $mitm_pid) — onboarding will be captured"
+  warm_cleanup() {
+    [[ -n "$mitm_pid" ]] && { kill -TERM "$mitm_pid" 2>/dev/null || true; wait "$mitm_pid" 2>/dev/null || true; }
+    [[ -n "$tcpdump_pid" ]] && { kill -INT "$tcpdump_pid" 2>/dev/null || true; sleep 1; }
+  }
+  trap warm_cleanup EXIT
+  ship_and_provision "$wprep" run "$host_proxy" "warm"
+  gx "$wprep" curl -s -m 8 -o /dev/null -x "http://$host_proxy:$PROXY_PORT" https://example.com/ \
+    && log "guest -> proxy -> internet: ok" || log "WARN: guest could not reach the proxy"
   log "onboarding (timeout ${ACTION_TIMEOUT}s) — screenshots land in $out/guest/out"
   local rc=0
   timeout "$ACTION_TIMEOUT" tart exec "$wprep" bash "/Users/admin/lab/run-action.sh" "$SETUP_ACTION" >"$out/driver.log" 2>&1 || rc=$?
+  warm_cleanup; trap - EXIT
   mkdir -p "$out/guest"
   gx "$wprep" sh -c 'cd ~/lab && tar cf - out 2>/dev/null' | tar xf - -C "$out/guest" 2>/dev/null || true
   if (( rc != 0 )); then

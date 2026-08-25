@@ -25,6 +25,13 @@ const ADDR = (process.env.WALLET_ADDR || "").toLowerCase();
   const { ctx, extId } = await L.launch({ fresh: true, proxy: false });
   log("setup-ambire: extension id", extId);
 
+  // Capture the extension's console + failed requests so a client-side derive
+  // failure (JS exception, rejected fetch) is visible, not just "went wrong".
+  const errs = [];
+  ctx.on("console", (m) => { if (m.type() === "error") { const t = m.text().slice(0, 200); errs.push("console.error: " + t); log("  [console.error] " + t); } });
+  ctx.on("requestfailed", (r) => { const m = `${r.method()} ${r.url().slice(0, 90)} — ${r.failure()?.errorText}`; errs.push("requestfailed: " + m); log("  [requestfailed] " + m); });
+  ctx.on("weberror", (e) => { const t = String(e.error()).slice(0, 200); errs.push("pageerror: " + t); log("  [pageerror] " + t); });
+
   let page = ctx.pages().find((p) => p.url().includes(extId));
   if (!page) page = await ctx.newPage();
   // Ambire uses an in-memory router: tab.html boots straight to get-started.
