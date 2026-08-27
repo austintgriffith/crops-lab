@@ -176,15 +176,19 @@ async function fillAny(page, sels, value, label) {
   // that's the network switch. Open it, choose the L2, then the list shows that
   // chain's tokens; pick ETH on the L2 to make it a bridge.
   await clickAny(page, ['text:All networks', 'text:Networks', "network-filter"], "open-network-filter", { optional: true, timeout: 6000 });
-  await page.waitForTimeout(1500);
-  await shot(page, "network-list"); await dumpTestids(page, "network-list");
-  await clickAny(page, [`text:${TO_CHAIN}`], "pick-network", { optional: true, timeout: 6000 });
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(2500);   // let the Select-network modal mount
+  await shot(page, "network-list");
+  // Pick the L2 row by EXACT text — a substring match grabs "Coinbase Wrapped
+  // BTC" (contains "base") in the background list instead of the modal's Base row.
+  const picked = await page.getByText(TO_CHAIN, { exact: true }).first()
+    .click({ timeout: 8000 }).then(() => true).catch(() => false);
+  console.log("  pick-network (exact):", TO_CHAIN, picked);
+  await page.waitForTimeout(3000);   // modal closes, token list refilters to the L2
   await shot(page, "after-network");
-  // Now the token list is filtered to the L2; pick the ETH token ROW — click
-  // "Ether" (the row subtitle), NOT "Ethereum" (that's the network-filter chip
-  // and re-clicking it reverts the filter to mainnet).
-  await clickAny(page, ["text:Ether\n", "text:Ether", "text:ETH"], "pick-dest-token", { optional: true, timeout: 6000 });
+  // Token list now filtered to the L2; pick the ETH token ROW by its "Ether"
+  // subtitle (NOT "Ethereum" — that's the filter chip).
+  await page.getByText("Ether", { exact: true }).first().click({ timeout: 6000 }).catch(() => {});
+  console.log("  pick-dest-token: Ether row");
   // Quotes settle (bridge.api.cx.metamask.io/getQuoteStream). Wait for the CTA.
   await page.waitForTimeout(10000);
   await shot(page, "quotes"); await dumpTestids(page, "quotes");
