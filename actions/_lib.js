@@ -104,7 +104,8 @@ async function launch({ fresh = false, proxy = true } = {}) {
   fs.mkdirSync(PROFILE, { recursive: true });
   const opts = { headless: false, args: EXT_ARGS, viewport: { width: 1200, height: 800 },
     permissions: ["clipboard-read", "clipboard-write"] };
-  if (proxy && PROXY) opts.proxy = { server: PROXY };
+  // PROXY_BYPASS: hosts the browser reaches directly (e.g. a node forwarder on 127.0.0.1)
+  if (proxy && PROXY) opts.proxy = { server: PROXY, ...(process.env.PROXY_BYPASS ? { bypass: process.env.PROXY_BYPASS } : {}) };
   const ctx = await chromium.launchPersistentContext(PROFILE, opts);
   const extId = await resolveExt(ctx);
   if (!extId) { console.error("extension never loaded (no SW/tab in 90s)"); process.exit(1); }
