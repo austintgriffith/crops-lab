@@ -113,7 +113,11 @@ def main():
             shared = [x for h in hosts for x in by_host.get(h, []) if x != s["id"]]
             others = set().union(*[toks[x] for x in shared]) if shared else set()
             hits = [t for t in token_hits(toks[s["id"]], ev) if t not in others]
-            if shared and not hits:
+            if not hits and local_hits and not (rpc & ev["rpc"]):
+                # shared host (e.g. api.rabby.io = RPC proxy + REST API): the node got this
+                # step's methods; the old host got none of them and none of its paths after the switch
+                state, why = "local", f"{a.node} · {'/'.join(local_hits)}; {seen} got none of these methods after switch"
+            elif shared and not hits:
                 state, why = "unseen", f"{seen} still contacted ({ev['count']} req) but this exact call wasn't singled out"
             else:
                 state, why = "out", f"{seen} · {ev['count']} req after switch" + (f" · {'/'.join(sorted(hits)[:3])}" if hits else "")
