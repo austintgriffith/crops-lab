@@ -343,8 +343,15 @@ cmd_run() {
     log "WARN: no passwordless tcpdump — NO PCAP, no ground truth this run. Fix: echo '$SUDOERS_LINE' | sudo tee /etc/sudoers.d/crops-tcpdump"
     echo "no pcap: passwordless tcpdump not configured" > "$out/PCAP_SKIPPED"
   fi
-  CROPS_OUT="$out" mitmdump --set "confdir=$CA_DIR" --listen-host "$host_proxy" --listen-port "$PROXY_PORT" \
-    -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
+  # LAN_RELAY=host:port: macOS may deny mitmdump LAN access; relay via system python
+  local relay_pid="" relay_args=()
+  if [[ -n "${LAN_RELAY:-}" ]]; then
+    LAN_RELAY="$LAN_RELAY" python3 "$LAB_DIR/capture/relay.py" >"$out/relay.log" 2>&1 &
+    relay_pid=$!; relay_args=(-s "$LAB_DIR/capture/lan_relay.py")
+    log "LAN relay 127.0.0.1:18545 -> $LAN_RELAY (pid $relay_pid)"
+  fi
+  LAN_RELAY="${LAN_RELAY:-}" CROPS_OUT="$out" mitmdump --set "confdir=$CA_DIR" --listen-host "$host_proxy" --listen-port "$PROXY_PORT" \
+    "${relay_args[@]}" -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
   mitm_pid=$!
   local i; for i in $(seq 1 20); do grep -q "listening" "$out/mitm.log" 2>/dev/null && break; sleep 0.5; done
   kill -0 "$mitm_pid" 2>/dev/null || die "mitmdump died — see $out/mitm.log"
@@ -352,6 +359,7 @@ cmd_run() {
   cleanup() {
     [[ -n "$mitm_pid" ]] && { kill -TERM "$mitm_pid" 2>/dev/null || true; wait "$mitm_pid" 2>/dev/null || true; }
     [[ -n "$tcpdump_pid" ]] && { kill -INT "$tcpdump_pid" 2>/dev/null || true; sleep 1; }
+    [[ -n "$relay_pid" ]] && { kill "$relay_pid" 2>/dev/null || true; }
   }
   trap cleanup EXIT
 

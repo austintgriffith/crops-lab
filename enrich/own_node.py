@@ -113,10 +113,15 @@ def main():
             shared = [x for h in hosts for x in by_host.get(h, []) if x != s["id"]]
             others = set().union(*[toks[x] for x in shared]) if shared else set()
             hits = [t for t in token_hits(toks[s["id"]], ev) if t not in others]
-            if not hits and local_hits and not (rpc & ev["rpc"]):
+            rpc_path_only = all("rpc" in h.lower() for h in hits)   # only the shared JSON-RPC transport path matched
+            if local_hits and rpc_path_only and not (rpc & ev["rpc"]):
                 # shared host (e.g. api.rabby.io = RPC proxy + REST API): the node got this
                 # step's methods; the old host got none of them and none of its paths after the switch
                 state, why = "local", f"{a.node} · {'/'.join(local_hits)}; {seen} got none of these methods after switch"
+            elif (not hits and a.tx and s.get("phase") == "broadcast" and s.get("removable_by") == a.toggle
+                  and "eth_sendRawTransaction" in node["rpc"]):
+                # real send went out via the node; this broadcast step's own calls got nothing
+                state, why = "gone", f"real send {a.tx[:10]}… went out via {a.node} (eth_sendRawTransaction); {seen} got none of this step's calls"
             elif shared and not hits:
                 state, why = "unseen", f"{seen} still contacted ({ev['count']} req) but this exact call wasn't singled out"
             else:
