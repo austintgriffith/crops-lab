@@ -52,10 +52,15 @@ const LOCAL_RPC = process.env.LOCAL_RPC || "";
     await page.getByText("Modify RPC URL").first().click();
     await page.waitForURL(/#\/custom-rpc/, { timeout: 15000 });
     await page.getByRole("button", { name: "Modify RPC URL" }).click();
-    await page.waitForTimeout(1000);
-    await page.getByText("Ethereum", { exact: true }).first().click();
+    // the chain sheet slides in; a click mid-animation is lost — retry until it closes
+    const search = page.locator('input[placeholder="Search chain"]');
+    await search.waitFor({ timeout: 10000 });
+    for (let i = 0; i < 8 && (await search.isVisible().catch(() => false)); i++) {
+      await page.waitForTimeout(800);
+      await page.getByText("Ethereum", { exact: true }).first().click().catch(() => {});
+    }
     const url = page.locator('input[placeholder="Enter the RPC URL"]');
-    await url.waitFor({ timeout: 10000 });
+    await url.waitFor({ state: "visible", timeout: 10000 });
     await url.fill(LOCAL_RPC);
     await shot(page, "rpc-edited");
     await page.getByRole("button", { name: "Save" }).click();
