@@ -7,7 +7,7 @@ the output is a ledger of who each request went to and what it carried.
 Output: `out/<run>/` (pcap + decrypted flows + `summary.md`) → `enrich/to_ledger.py`
 → the transit-map `ledger.tsv`.
 
-Design notes: [PLAN.md](PLAN.md). Cross-route results: [docs/FINDINGS.md](docs/FINDINGS.md).
+**How we profile a wallet, step by step: [docs/METHOD.md](docs/METHOD.md).** Design notes: [PLAN.md](PLAN.md). Cross-route results: [docs/FINDINGS.md](docs/FINDINGS.md).
 Substrate: [clawd-containers](https://github.com/clawdbotatg/clawd-containers)
 (`~/clawd/clawd-containers`, read its `CLAUDE.md`) — tart macOS VMs via `cont`. Reused, not rebuilt.
 
@@ -34,6 +34,9 @@ Two baked images, cloned per run so every capture starts from an identical clean
 ./lab run send-eth        # route 01: MetaMask ETH send, mainnet
 ./lab run send-ens        # route 02: ETH send to an ENS name
 ./lab run deposit-aave    # route 03: supply ETH to Aave V3 (full dapp flow)
+./lab run rabby:send-token        # any wallet × action: actions/run.js + actions/wallets/<wallet>.js
+./lab run rainbow:send-eth+node   # +node: point the wallet at your node first
+VM=crops2 GOLD=crops-gold PROXY_PORT=8081 ./lab run ...   # a second run in parallel
 ./lab summarize <run>     # re-audit an existing capture
 ./lab gui | shell | status | down | rm
 ```

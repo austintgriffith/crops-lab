@@ -32,7 +32,21 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b or b"").hexdigest()
 
 
+def responseheaders(flow):
+    # Server-sent streams (Phantom's /swap/v2/stream/quotes) never "finish" while the
+    # wallet listens: buffering them starves the client. Pass them through, log now.
+    if "text/event-stream" in flow.response.headers.get("content-type", ""):
+        flow.response.stream = True
+        flow.metadata["crops_logged"] = True
+        _log(flow, stream=True)
+
+
 def response(flow):
+    if not flow.metadata.get("crops_logged"):
+        _log(flow)
+
+
+def _log(flow, stream=False):
     req, resp = flow.request, flow.response
     body = req.raw_content or b""
     hdrs_kept, hdrs_present = {}, []
@@ -56,8 +70,10 @@ def response(flow):
         "req_body_sha256": _sha(body),
         "req_body_len": len(body),
         "req_body_preview": body[:PREVIEW].decode("utf-8", "replace") if body else "",
-        "resp_len": len(resp.raw_content or b""),
+        "resp_len": 0 if stream else len(resp.raw_content or b""),
     }
+    if stream:
+        rec["stream"] = True
     if FULL_BODY and body:
         rec["req_body_full"] = body.decode("utf-8", "replace")
     with open(os.path.join(_dir(), "flows.jsonl"), "a") as f:

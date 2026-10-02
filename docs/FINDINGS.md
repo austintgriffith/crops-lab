@@ -145,3 +145,23 @@ third parties, and most of them are analytics and unused widgets, not the protoc
   niche testnet RPCs (megaeth, monad) remain unlabeled.
 - **`sees` is proven** by the capture; `blocks` / `lies` in the ledger are left blank for a human
   pass.
+
+## Oct 2 2026 — four wallets × four actions (all real mainnet txs)
+
+Rabby 0.94.6, Rainbow 1.6.11, Coinbase Wallet 3.148.0, Phantom 26.31.0; each did an ETH
+send, an ERC-20 send, a built-in swap, and a token approval (swap USDC→ETH). Every tx,
+run id and contract: `~/ef/strawmapuserflow/HANDOFF-2026-10-02-session.md`. Method: `docs/METHOD.md`.
+
+| | Rabby | Rainbow | Coinbase | Phantom |
+|---|---|---|---|---|
+| RPC + broadcast | api.rabby.io | rpc.rainbow.me | chain-proxy.wallet.coinbase.com | node-proxy.phantom.app (swaps: /v0/submission) |
+| Swap quote from | Rabby server (1inch / Uniswap via AllowanceHolder) | swap.p.rainbow.me (Sprinter) | api.wallet.coinbase.com ("28 sources") | api.phantom.app stream (DexRouter) |
+| Fee shown | 0.25% | ~0.85% | $0.01 on $1.34 | 0.85% (+ Auto slippage 4.9%) |
+| Approval | exact, own tx | exact, batched in 1 tx (7702) | exact, own tx, not shown on review | **unlimited**, own tx |
+| Token checked by a server | yes (identity sheet) | no | no | no |
+| Recipient sent to a server | yes (has_transfer, is_spoofing) | yes (RPC ENS reverse) | yes (scanAddress + saveUsage) | yes (simulation + recents upload) |
+| Surprise | gets your full trade record after signing | swap delegated the account to Calibur | signs a Coinbase login with your key; polls BTC/LTC/DOGE/SOL | server user account; swap POSTs every address from the seed |
+
+Caveats: query strings are not logged, so what a GET carries in its query is inferred and
+marked so on the maps. The throwaway account became an EIP-7702 delegated account during
+the Rainbow swap; every run after that (Coinbase, Phantom) used a delegated account.

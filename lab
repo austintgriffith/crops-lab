@@ -128,6 +128,10 @@ ship_and_provision() {
   if [[ "$mode" == "run" ]]; then
     cp "$CA_CERT" "$stage/crops/mitm-ca-cert.pem"
     printf 'HOST_PROXY=%s\nPROXY_PORT=%s\nRUN_ID=%s\nWALLET=%s\n' "$host_proxy" "$PROXY_PORT" "$run_id" "$WALLET" > "$stage/crops/run.env"
+    [[ -n "${DO:-}" ]] && printf 'DO=%s\nNODE=%s\n' "$DO" "${NODE:-0}" >> "$stage/crops/run.env"
+    # per-run knobs from the host shell (override .env.crops for this run only)
+    local k; for k in SEND_BROADCAST TOKEN TOKEN_AMOUNT SWAP_TO SWAP_AMOUNT APPROVE_AMOUNT; do
+      [[ -n "${!k:-}" ]] && printf '%s=%s\n' "$k" "${!k}" >> "$stage/crops/run.env"; done; true
     [[ -f "$ENV_FILE" ]] && install -m 600 "$ENV_FILE" "$stage/crops/.env.crops"
     [[ -d "$LAB_DIR/wallet" ]] && cp -R "$LAB_DIR/wallet" "$stage/crops/wallet"
   fi
@@ -270,6 +274,7 @@ cmd_warm() {
   warm_cleanup() {
     [[ -n "$mitm_pid" ]] && { kill -TERM "$mitm_pid" 2>/dev/null || true; wait "$mitm_pid" 2>/dev/null || true; }
     [[ -n "$tcpdump_pid" ]] && { kill -INT "$tcpdump_pid" 2>/dev/null || true; sleep 1; }
+    true
   }
   trap warm_cleanup EXIT
   ship_and_provision "$wprep" run "$host_proxy" "warm"
@@ -294,11 +299,22 @@ cmd_warm() {
 }
 
 cmd_run() {
-  local action="${1:-}"; [[ -n "$action" ]] || die "usage: lab run <action>   (actions/: $(ls "$LAB_DIR/actions" | sed 's/\.js$//' | tr '\n' ' '))"
+  local action="${1:-}"; [[ -n "$action" ]] || die "usage: lab run <action> | <wallet>:<action>[+node]   (actions/: $(ls "$LAB_DIR/actions" | sed 's/\.js$//' | tr '\n' ' '))"
+  # <wallet>:<action>[+node] → actions/run.js with wallets/<wallet>.js
+  local label="$action"
+  if [[ "$action" == *:* ]]; then
+    local w="${action%%:*}" d="${action#*:}"
+    export NODE=0; [[ "$d" == *+node ]] && { d="${d%+node}"; NODE=1; }
+    [[ -f "$LAB_DIR/actions/wallets/$w.js" ]] || die "no actions/wallets/$w.js"
+    export DO="$d"
+    # warm images are named after gold (crops-gold → crops-warm-<wallet>), so a second VM=crops2 GOLD=crops-gold reuses them
+    if [[ "$WALLET" != "$w" ]]; then WALLET="$w"; WARM="${GOLD%-gold}-warm"; [[ "$WALLET" == "metamask" ]] || WARM+="-$WALLET"; fi
+    label="$d-$w"; [[ $NODE == 1 ]] && label+="-localnode"; action=run
+  fi
   [[ -f "$LAB_DIR/actions/$action.js" ]] || die "no actions/$action.js"
   vm_exists "$GOLD" || die "no $GOLD — run 'lab bake' first"
   command -v mitmdump >/dev/null || die "mitmdump not installed (brew install mitmproxy)"
-  local run_id="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$action}"
+  local run_id="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$label}"
   local out="$OUT_ROOT/$run_id"; mkdir -p "$out"; RUN_LOG="$out/run.log"
   # Base image: crops-gold by default. Wallet actions (they touch the
   # persistent wallet-profile) auto-clone crops-warm instead, which already
@@ -351,7 +367,7 @@ cmd_run() {
     log "LAN relay 127.0.0.1:18545 -> $LAN_RELAY (pid $relay_pid)"
   fi
   LAN_RELAY="${LAN_RELAY:-}" CROPS_OUT="$out" mitmdump --set "confdir=$CA_DIR" --listen-host "$host_proxy" --listen-port "$PROXY_PORT" \
-    "${relay_args[@]}" -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
+    ${relay_args[@]+"${relay_args[@]}"} -s "$LAB_DIR/capture/flow_logger.py" >"$out/mitm.log" 2>&1 &
   mitm_pid=$!
   local i; for i in $(seq 1 20); do grep -q "listening" "$out/mitm.log" 2>/dev/null && break; sleep 0.5; done
   kill -0 "$mitm_pid" 2>/dev/null || die "mitmdump died — see $out/mitm.log"
@@ -359,7 +375,7 @@ cmd_run() {
   cleanup() {
     [[ -n "$mitm_pid" ]] && { kill -TERM "$mitm_pid" 2>/dev/null || true; wait "$mitm_pid" 2>/dev/null || true; }
     [[ -n "$tcpdump_pid" ]] && { kill -INT "$tcpdump_pid" 2>/dev/null || true; sleep 1; }
-    [[ -n "$relay_pid" ]] && { kill "$relay_pid" 2>/dev/null || true; }
+    [[ -n "$relay_pid" ]] && { kill "$relay_pid" 2>/dev/null || true; }; true
   }
   trap cleanup EXIT
 
