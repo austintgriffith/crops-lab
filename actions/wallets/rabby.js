@@ -76,6 +76,9 @@ async function sendForm(page, { to }, { token, amount }) {
   log("  amount field:", await amt.inputValue());
   await page.waitForTimeout(3000);
   await shot(page, "form");
+  // first send to an address: Rabby's server-side history check adds a risk checkbox
+  const risk = page.getByText("I understand the risks and want to continue");
+  if (await risk.isVisible().catch(() => false)) { await risk.click(); log("  risk checkbox: ticked (new recipient)"); await page.waitForTimeout(800); }
   await page.getByRole("button", { name: /^Send$/ }).click();
   await page.getByRole("button", { name: /^Confirm$/ }).waitFor({ timeout: 30000 });
   await page.waitForTimeout(5000);   // gas + pre-exec simulation
