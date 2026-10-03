@@ -39,8 +39,11 @@ const ADDR = (process.env.WALLET_ADDR || "").toLowerCase();
   await dash.clickText("CREATE", { maxX: 400 }); await sleep(4000);
   const text = await dash.text();
   if (ADDR && !text.toLowerCase().includes(ADDR.slice(0, 11))) throw new Error("seed imported, but WALLET_ADDR is not account 1");
-  await dash.clickText("^1 ?0xD3fD78b46", { re: true }).catch(async () => {
-    const at = await dash.find("0xD3fD78b46", { re: true }); await dash.click(...at); });
+  // account 1 row (shown as the first 11 chars of the address)
+  const head = ADDR.slice(0, 11);
+  const at = await dash.ev(`(()=>{const m=[...document.querySelectorAll("body *")].filter(e=>{const b=e.getBoundingClientRect();const t=(e.innerText||"");return b.width>0&&b.x>=0&&b.x<400&&t.length<60&&t.toLowerCase().includes(${JSON.stringify(head)})});const e=m[m.length-1];if(!e)return null;const b=e.getBoundingClientRect();return [b.x+b.width/2,b.y+b.height/2]})()`);
+  if (!at) throw new Error("frame: account 1 row not found");
+  await dash.click(...at);
   await sleep(3000);
   log("  tray:", (await tray.text()).slice(0, 120));
   try { await tray.shot(`${L.OUT}/frame-setup-done.png`); } catch {}

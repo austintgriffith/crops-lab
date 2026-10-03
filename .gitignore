@@ -18,3 +18,5 @@ __pycache__/
 # throwaway seed phrase (scratch)
 .seed.tmp
 .seed*
+.env.crops.*
+!.env.crops.example

@@ -32,8 +32,15 @@ marked that way on the map.
 | `crops-warm-<wallet>` | same, for rabby, rainbow, plain, coinbase, phantom |
 
 Every wallet imports the **same throwaway 12-word seed** (`WALLET_MNEMONIC` in
-gitignored `.env.crops`), so every wallet controls the same address
-`0xd3fd78b46314ffe7b586b8cb3020283ba19b607f` and runs are directly comparable.
+gitignored `.env.crops`), so every wallet controls the same address and runs are directly
+comparable. Address since Oct 2 2026 evening: `0x3eaA81729965411F11376F9202391083Ee9141E8`.
+All Oct 1–2 maps used the retired `0xd3fd78b46314ffe7b586b8cb3020283ba19b607f` (its seed
+leaked into a session transcript; funds swept, see below). The old account is EIP-7702
+delegated to Calibur; the new one is a plain EOA.
+
+**Rotating the throwaway:** `cast wallet new-mnemonic` into `.env.crops` without printing it,
+keep the old file as `.env.crops.retired-<date>` (gitignored, 0600), sweep tokens then ETH
+with `cast send --mnemonic`, then `lab warm` every wallet again.
 
 Build a warm image once: `WALLET=<wallet> ./lab warm` (runs `actions/setup-<wallet>.js`,
 snapshots the result).
