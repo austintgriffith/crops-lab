@@ -133,7 +133,10 @@ ship_and_provision() {
     local k; for k in SEND_BROADCAST TOKEN TOKEN_AMOUNT SWAP_TO SWAP_AMOUNT APPROVE_AMOUNT; do
       [[ -n "${!k:-}" ]] && printf '%s=%s\n' "$k" "${!k}" >> "$stage/crops/run.env"; done; true
     [[ -f "$ENV_FILE" ]] && install -m 600 "$ENV_FILE" "$stage/crops/.env.crops"
-    [[ -d "$LAB_DIR/wallet" ]] && cp -R "$LAB_DIR/wallet" "$stage/crops/wallet"
+    # only the wallet this run uses (Frame alone is ~550 MB)
+    if [[ -d "$LAB_DIR/wallet/$WALLET" ]]; then
+      mkdir -p "$stage/crops/wallet"; cp -R "$LAB_DIR/wallet/$WALLET" "$stage/crops/wallet/$WALLET"
+    fi
   fi
   local nfiles attempt ok=0
   nfiles="$(find "$stage" -type f | wc -l | tr -d ' ')"

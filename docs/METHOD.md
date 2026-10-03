@@ -46,7 +46,7 @@ snapshots the result).
 ```
 
 Actions: `send-eth`, `send-token`, `swap`, `approve-swap`. Wallets with adapters:
-`rabby`, `rainbow`, `coinbase`, `phantom`. (MetaMask still uses its older per-action
+`rabby`, `rainbow`, `coinbase`, `phantom`, `frame` (send-eth only). (MetaMask still uses its older per-action
 scripts: `./lab run send-eth`, `swap-metamask`, …)
 
 What a run does: delete the VM → clone the wallet's warm image → boot → start mitmproxy +
@@ -134,6 +134,15 @@ elements only (or click known coordinates). The swap tab opens on Solana (SOL→
 Quotes arrive as a server-sent stream; mitmproxy used to buffer it forever, so
 `flow_logger.py` now streams `text/event-stream` responses and logs them on headers.
 
+**Frame 0.6.11 (desktop)** — not an extension. `wallets/frame.js` launches the app with
+`--remote-debugging-port=9333 --user-data-dir=~/lab/frame-profile --proxy-server=…` and
+drives its Tray/Dash/send.frame.eth windows over raw CDP (`actions/_cdp.js`); Playwright
+can't attach. The account panel toggles on click; the signer unlock is the signer
+section's own MORE → `[class*=clusterValueClick]` "Hot" → password in Dash. The tray
+scrolls when you click low elements: scroll it back to top before using the header send
+button. **Capture gap:** Frame's main process ignores the proxy; its Pylon websockets
+appear only in the pcap, so those map steps are `code`, not `observed`.
+
 ## 7. Lab fixes made Oct 2
 
 - `lab run` with no `LAN_RELAY` died on an unbound empty array (bash 3.2 + `set -u`).
@@ -143,3 +152,5 @@ Quotes arrive as a server-sent stream; mitmproxy used to buffer it forever, so
 - Warm image names derive from `GOLD`, so a second VM reuses `crops-warm-*`.
 - `flow_logger.py`: SSE streaming (above).
 - `build.py`: `insert_steps`, `drop_steps` (schema updated).
+- `lab` ships only `wallet/$WALLET` into the guest (not every wallet).
+- `run.js` uses an adapter's own `launch` (desktop wallets).

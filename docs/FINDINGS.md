@@ -165,3 +165,9 @@ run id and contract: `~/ef/strawmapuserflow/HANDOFF-2026-10-02-session.md`. Meth
 Caveats: query strings are not logged, so what a GET carries in its query is inferred and
 marked so on the maps. The throwaway account became an EIP-7702 delegated account during
 the Rainbow swap; every run after that (Coinbase, Phantom) used a delegated account.
+
+**Frame 0.6.11 (desktop, Oct 2 evening):** real send 0x9b2302a6…7f0f. No send form: the
+send app (send.frame.eth) is resolved via ENS, fetched over IPFS from Frame's Nebula
+gateway and run locally; RPC for every chain defaults to Frame's Pylon. Fewest third
+parties of any wallet (Frame Labs, CoinGecko images, GitHub updates). Its main process
+bypasses the proxy, so RPC contents are from source, not the wire. Unmaintained since early 2025.

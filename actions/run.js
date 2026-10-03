@@ -43,7 +43,9 @@ const METHOD = { "send-eth": "sendEth", "send-token": "sendToken", "swap": "swap
   const tag = `${WALLET}:${DO}${NODE ? "+node" : ""}`;
 
   if (NODE && W.prepNode) args.localRpc = W.prepNode(args.localRpc);
-  let { ctx, extId } = await L.launch();
+  // desktop wallets (Frame) bring their own launcher
+  const launch = W.launch || L.launch;
+  let { ctx, extId } = await launch();
   log(`${tag}: extension id ${extId}`);
   let page = await W.open(ctx, extId, args, "start");
 
@@ -55,7 +57,7 @@ const METHOD = { "send-eth": "sendEth", "send-token": "sendToken", "swap": "swap
     await ctx.close();
     await new Promise((r) => setTimeout(r, 3000));
     log(`rpc-edit: done — browser restarted; everything after this is on ${args.localRpc}`);
-    ({ ctx } = await L.launch());
+    ({ ctx } = await launch());
     page = await W.open(ctx, extId, args, "node");
   }
 
@@ -68,10 +70,10 @@ const METHOD = { "send-eth": "sendEth", "send-token": "sendToken", "swap": "swap
     fs.writeFileSync(path.join(L.OUT, "tx.txt"), `MODE: dry (no broadcast)\n${detail}`);
   } else {
     await W.confirm(page, args, extId);
-    await page.waitForTimeout(15000);   // broadcast + first status polls
+    await new Promise((r) => setTimeout(r, 15000));   // broadcast + first status polls
     await shot(page, "after-confirm"); await dumpTestIds(page, "after-confirm");
     fs.writeFileSync(path.join(L.OUT, "tx.txt"), `MODE: broadcast\n${detail}(txhash: see flows.jsonl)\n`);
-    await page.waitForTimeout(20000);   // receipt polling
+    await new Promise((r) => setTimeout(r, 20000));   // receipt polling
     await shot(page, "done");
     log(`${tag}: submitted`);
   }
