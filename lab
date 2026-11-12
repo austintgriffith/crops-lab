@@ -130,7 +130,7 @@ ship_and_provision() {
     printf 'HOST_PROXY=%s\nPROXY_PORT=%s\nRUN_ID=%s\nWALLET=%s\n' "$host_proxy" "$PROXY_PORT" "$run_id" "$WALLET" > "$stage/crops/run.env"
     [[ -n "${DO:-}" ]] && printf 'DO=%s\nNODE=%s\n' "$DO" "${NODE:-0}" >> "$stage/crops/run.env"
     # per-run knobs from the host shell (override .env.crops for this run only)
-    local k; for k in SEND_BROADCAST TOKEN TOKEN_AMOUNT SWAP_TO SWAP_AMOUNT APPROVE_AMOUNT; do
+    local k; for k in SEND_BROADCAST TOKEN TOKEN_AMOUNT SWAP_TO SWAP_AMOUNT APPROVE_AMOUNT SEND_USD SWAP_USD SWAP_FROM NETWORK IDLE_SECS; do
       [[ -n "${!k:-}" ]] && printf '%s=%s\n' "$k" "${!k}" >> "$stage/crops/run.env"; done; true
     [[ -f "$ENV_FILE" ]] && install -m 600 "$ENV_FILE" "$stage/crops/.env.crops"
     # only the wallet this run uses (Frame alone is ~550 MB)

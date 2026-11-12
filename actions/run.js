@@ -29,7 +29,7 @@ const args = {
   localRpc: process.env.LOCAL_RPC || "http://192.168.68.54:8545",
 };
 // action name → adapter method
-const METHOD = { "send-eth": "sendEth", "send-token": "sendToken", "swap": "swap", "approve-swap": "approveSwap" };
+const METHOD = { "home": "home", "send-eth": "sendEth", "send-token": "sendToken", "swap": "swap", "approve-swap": "approveSwap" };
 
 (async () => {
   const W = require(`./wallets/${WALLET}.js`);
