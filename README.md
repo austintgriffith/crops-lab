@@ -141,3 +141,7 @@ screen. `to_ledger.py` output for route 01 matches the hand-traced
 explained in FINDINGS). The live captures are *richer* than the hand-drawn maps.
 
 See [docs/FINDINGS.md](docs/FINDINGS.md) for the per-route breakdown and the party comparison.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
